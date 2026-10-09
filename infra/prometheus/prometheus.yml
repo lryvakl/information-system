@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # --- application services ---
+  - job_name: race-engine
+    static_configs: [{ targets: ["race-engine:9100"] }]
+  - job_name: race-control
+    static_configs: [{ targets: ["race-control:9101"] }]
+  - job_name: auth
+    static_configs: [{ targets: ["auth:8000"] }]
+  - job_name: pitwall-api
+    static_configs: [{ targets: ["pitwall-api:8000"] }]
+
+  # --- infrastructure ---
+  - job_name: postgres
+    static_configs: [{ targets: ["postgres-exporter:9187"] }]
+  - job_name: rabbitmq
+    static_configs: [{ targets: ["rabbitmq:15692"] }]
+
+  # --- observability stack itself ---
+  - job_name: prometheus
+    metrics_path: /prometheus/metrics
+    static_configs: [{ targets: ["localhost:9090"] }]
+  - job_name: loki
+    static_configs: [{ targets: ["loki:3100"] }]
+  - job_name: tempo
+    static_configs: [{ targets: ["tempo:3200"] }]
+  - job_name: grafana
+    static_configs: [{ targets: ["grafana:3000"] }]

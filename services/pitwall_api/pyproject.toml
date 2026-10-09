@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pitwall-api"
+version = "1.0.0"
+description = "Read-only REST API over race data, protected by the gateway."
+requires-python = ">=3.12"
+dependencies = ["f1-common[web,db]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

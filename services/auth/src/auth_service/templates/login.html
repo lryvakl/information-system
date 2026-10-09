@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>F1 Pit Wall - Sign in</title>
+  <style>
+    :root { --bg: #15151e; --panel: #1f1f2b; --text: #f2f2f2; --muted: #9a9aa8; --accent: #e10600; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: repeating-linear-gradient(45deg, #15151e 0 24px, #191923 24px 48px);
+      color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { width: min(380px, calc(100% - 32px)); background: var(--panel); border-top: 4px solid var(--accent);
+           border-radius: 8px; padding: 32px; box-shadow: 0 20px 40px rgba(0, 0, 0, .4); }
+    h1 { margin: 0 0 4px; font-size: 1.5rem; letter-spacing: .02em; }
+    p.sub { margin: 0 0 24px; color: var(--muted); font-size: .9rem; }
+    label { display: block; font-size: .8rem; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .08em; }
+    input { width: 100%; padding: 10px 12px; border-radius: 4px; border: 1px solid #3a3a48; background: #15151e; color: var(--text); font-size: 1rem; }
+    input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+    button { margin-top: 24px; width: 100%; padding: 12px; border: 0; border-radius: 4px; background: var(--accent);
+             color: #fff; font-weight: 700; font-size: 1rem; letter-spacing: .05em; cursor: pointer; }
+    button:hover { filter: brightness(1.1); }
+    .error { margin: 0 0 8px; padding: 10px 12px; border-radius: 4px; background: rgba(225, 6, 0, .15); color: #ff8a80; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>F1 Pit Wall</h1>
+    <p class="sub">Race telemetry platform. Authorized team members only.</p>
+    $error_block
+    <form method="post" action="/auth/login">
+      <input type="hidden" name="next" value="$next">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">LIGHTS OUT</button>
+    </form>
+  </main>
+</body>
+</html>

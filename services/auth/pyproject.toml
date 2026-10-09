@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auth-service"
+version = "1.0.0"
+description = "Authorization server: users in SQLite, JWT sessions, gateway verification endpoint."
+requires-python = ">=3.12"
+dependencies = [
+    "f1-common[web]",
+    "bcrypt>=4.2",
+    "PyJWT>=2.9",
+    "python-multipart>=0.0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+auth_service = ["templates/*.html"]

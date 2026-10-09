@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "race-engine"
+version = "1.0.0"
+description = "Generates F1 race data (simulation or real race replay from OpenF1) into PostgreSQL and RabbitMQ."
+requires-python = ">=3.12"
+dependencies = [
+    "f1-common[db,mq]",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

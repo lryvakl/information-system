@@ -1,0 +1,32 @@
+# Workspace-level tooling configuration (each service has its own pyproject.toml).
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["libs/common/src", "services/*/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "N", "A"]
+ignore = [
+    "RUF001",
+    "RUF012",
+    "S311",  # random is used for simulation, not cryptography
+    "N818",  # domain exceptions (InvalidToken, RaceNotFound) read better without an Error suffix
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["f1_common", "auth_service", "race_engine", "race_control", "pitwall_api"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib -q"
+testpaths = [
+    "libs/common/tests",
+    "services/auth/tests",
+    "services/race_engine/tests",
+    "services/race_control/tests",
+    "services/pitwall_api/tests",
+]
+pythonpath = ["services/race_engine/tests"]

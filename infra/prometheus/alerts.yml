@@ -1,0 +1,57 @@
+groups:
+  - name: race
+    rules:
+      - alert: TyreWearCritical
+        expr: f1_tyre_wear_percent > 80
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.driver }} tyres at {{ $value | printf \"%.0f\" }}% wear - box this lap"
+      - alert: SafetyCarDeployed
+        expr: f1_safety_car_active == 1
+        labels: { severity: info }
+        annotations:
+          summary: "Safety car deployed on lap {{ with query \"f1_race_current_lap\" }}{{ . | first | value }}{{ end }}"
+      - alert: SlowPitStop
+        expr: increase(f1_pit_stationary_time_seconds_bucket{le="5.0"}[1m]) < increase(f1_pit_stationary_time_seconds_count[1m])
+        labels: { severity: info }
+        annotations:
+          summary: "{{ $labels.team }} had a pit stop slower than 5 seconds"
+
+  - name: platform
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is down"
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "PostgreSQL is not reachable by the exporter"
+      - alert: QueueBacklog
+        expr: rabbitmq_queue_messages_ready{queue="race-control"} > 500
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "race-control is falling behind ({{ $value }} messages waiting)"
+      - alert: DeadLetters
+        expr: rabbitmq_queue_messages_ready{queue="race-control.dead"} > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} messages could not be processed and were dead-lettered"
+      - alert: LoginBruteForce
+        expr: increase(auth_login_attempts_total{result="failure"}[5m]) > 10
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 10 failed logins in 5 minutes"
+      - alert: HighHttpErrorRate
+        expr: |
+          sum by (job) (rate(app_http_requests_total{status=~"5.."}[5m]))
+            / sum by (job) (rate(app_http_requests_total[5m])) > 0.05
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }} returns >5% server errors"

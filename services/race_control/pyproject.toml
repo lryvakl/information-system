@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "race-control"
+version = "1.0.0"
+description = "Consumes race events from RabbitMQ: event journal, commentary, statistics and championship."
+requires-python = ">=3.12"
+dependencies = ["f1-common[db,mq]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
