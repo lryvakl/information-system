@@ -4,13 +4,15 @@ Each HTTP service gets the same cross-cutting features for free:
 JSON logs, tracing, ``/metrics``, ``/healthz`` and RED request metrics.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from time import perf_counter
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from prometheus_client import Counter, Histogram, make_asgi_app
+from prometheus_client import REGISTRY, Counter, Histogram
+from prometheus_client.exposition import choose_encoder
 
 from f1_common.logging import configure_logging
 from f1_common.metrics import trace_exemplar
@@ -33,7 +35,13 @@ def create_app(settings: BaseServiceSettings, **fastapi_kwargs: object) -> FastA
 
     app = FastAPI(**fastapi_kwargs)  # type: ignore[arg-type]
     app.middleware("http")(_record_request_metrics)
-    app.mount("/metrics", make_asgi_app())
+    logging.getLogger("uvicorn.access").addFilter(_skip_probe_requests)
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics(request: Request) -> Response:
+        # OpenMetrics format when Prometheus asks for it: required for exemplars.
+        encoder, content_type = choose_encoder(request.headers.get("accept", ""))
+        return Response(encoder(REGISTRY), media_type=content_type)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -41,6 +49,11 @@ def create_app(settings: BaseServiceSettings, **fastapi_kwargs: object) -> FastA
 
     FastAPIInstrumentor.instrument_app(app, excluded_urls="healthz,metrics")
     return app
+
+
+def _skip_probe_requests(record: logging.LogRecord) -> bool:
+    """Drop access-log noise from Prometheus scrapes and health checks."""
+    return not any(path in record.getMessage() for path in _UNINSTRUMENTED)
 
 
 async def _record_request_metrics(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
