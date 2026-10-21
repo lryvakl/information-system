@@ -1,147 +1,306 @@
-# F1 Pit Wall — інформаційна система моніторингу роботи з БД
+# F1 Pit Wall — інформаційна система моніторингу роботи з базою даних
 
-Прикладна інформаційна система в тематиці **Formula 1**. Система генерує і
-актуалізує дані гонок у PostgreSQL (симуляція або **повтор реальної гонки** з
-відкритого API [OpenF1](https://openf1.org)), обмінюється подіями через
-RabbitMQ, збирає метрики (Prometheus), логи (Loki) і трейси (Tempo) та
-відображає все це в Grafana. Доступ є лише в авторизованих користувачів.
+## 1. Опис проєкту
 
-## Архітектура
+**F1 Pit Wall** — прикладна інформаційна система, яка генерує й актуалізує дані
+в реляційній БД, збирає та обробляє метрики роботи системи й СУБД і відображає
+їх у Grafana. Доступ до системи мають лише авторизовані користувачі.
+
+Предметна область — **Formula 1**. Система моделює «стіну піт-лейну» гоночної
+команди: у реальному часі надходять кола, піт-стопи, обгони, сходи з дистанції,
+повідомлення дирекції гонки та телеметрія автомобілів. Ці дані записуються в
+PostgreSQL, передаються між сервісами через брокер повідомлень і стають джерелом
+метрик, логів і трейсів.
+
+Дані надходять з одного з двох джерел:
+
+- **повтор реальної гонки**. Історичні дані сезону 2024 з відкритого API
+  [OpenF1](https://openf1.org): час кіл і секторів, піт-стопи, шини, повідомлення
+  Race Control. Гонка відтворюється коло за колом у прискореному часі;
+- **симуляція**. Синтетичні гонки з моделлю зносу шин, витрати палива,
+  стратегією піт-стопів, виїздами safety car і сходами з дистанції.
+
+## 2. Архітектура
 
 ```
-                     ┌───────────────── gateway (nginx, :8080) ─────────────────┐
-  користувач ──────▶ │ /auth/*      → auth           (FastAPI + SQLite, JWT)    │
-                     │ /grafana/*   → Grafana        ┐                          │
-                     │ /api/*       → pitwall-api    ├ auth_request → auth      │
-                     │ /prometheus/*, /rabbitmq/*    ┘ (лише роль admin)        │
-                     └──────────────────────────────────────────────────────────┘
+                     ┌──────────────── gateway (nginx, порт 8080) ────────────────┐
+  користувач ──────▶ │ /auth/*      → auth           (FastAPI + SQLite, JWT)      │
+                     │ /grafana/*   → Grafana        ┐                            │
+                     │ /api/*       → pitwall-api    ├─ перевірка через auth      │
+                     │ /prometheus/*, /rabbitmq/*    ┘  (лише роль admin)         │
+                     └────────────────────────────────────────────────────────────┘
 
   OpenF1 API ─┐
               ▼
-  race-engine ──INSERT/UPDATE/DELETE──▶ PostgreSQL ◀── postgres-exporter
-      │                                    ▲   ▲
-      └──publish events──▶ RabbitMQ ──▶ race-control      pitwall-api (SELECT-only)
+  race-engine ──INSERT / UPDATE / DELETE──▶ PostgreSQL ◀── postgres-exporter
+      │                                       ▲    ▲
+      └── події ──▶ RabbitMQ ──▶ race-control ┘    └── pitwall-api (лише SELECT)
 
-  /metrics усіх сервісів ───────────────────────▶ Prometheus (TSDB) ─┐
-  stdout (JSON-логи з trace_id) ─▶ Alloy ─▶ Loki ────────────────────┼─▶ Grafana
-  OpenTelemetry spans ──────────────────────────▶ Tempo ─────────────┘
+  метрики всіх сервісів (/metrics) ─────────────▶ Prometheus (TSDB) ─┐
+  логи контейнерів (JSON + trace_id) ─▶ Alloy ─▶ Loki ───────────────┼─▶ Grafana
+  трейси (OpenTelemetry) ───────────────────────▶ Tempo ─────────────┘
 ```
 
-| Сервіс | Роль |
+### 2.1. Компоненти
+
+| Компонент | Технологія | Призначення |
+|---|---|---|
+| `race-engine` | Python | Генерує й актуалізує дані гонки в БД, публікує події в RabbitMQ, віддає телеметрію як метрики |
+| `race-control` | Python | Споживає події з RabbitMQ: веде журнал подій, формує повідомлення Race Control, рахує статистику, нараховує очки чемпіонату |
+| `pitwall-api` | Python, FastAPI | REST API для читання даних гонок (працює з окремою read-only роллю БД) |
+| `auth` | Python, FastAPI, SQLite | Сервер авторизації: облік користувачів, видача та перевірка JWT, ролі |
+| `gateway` | nginx | Єдина точка входу в систему; перед кожним захищеним запитом звертається до `auth` |
+| `postgres` | PostgreSQL 16 | Основна база даних системи |
+| `rabbitmq` | RabbitMQ 3.13 | Брокер повідомлень між сервісами |
+| `postgres-exporter` | Prometheus exporter | Метрики роботи СУБД (транзакції, операції з рядками, з'єднання, розмір, кеш) |
+| `prometheus` | Prometheus 2.54 | Збір метрик, зберігання у вбудованій TSDB, правила алертів |
+| `loki` + `alloy` | Grafana Loki 3.2, Grafana Alloy | Збір і зберігання логів усіх контейнерів |
+| `tempo` | Grafana Tempo 2.6 | Зберігання розподілених трейсів, побудова service graph |
+| `grafana` | Grafana 11.3 | Візуалізація метрик, логів, трейсів і даних з БД |
+
+### 2.2. Потік даних
+
+1. `race-engine` отримує чергове коло гонки (з OpenF1 або із симулятора).
+2. Розраховує позиції, розриви, обгони та найшвидше коло.
+3. Записує в PostgreSQL кола, піт-стопи і телеметрію автомобілів (щосекунди).
+4. Публікує події (`lap.completed`, `pit.stop`, `overtake`, `race.control` тощо) в обмінник RabbitMQ.
+5. `race-control` отримує події з черги й записує їх у журнал `race_events`. Після фінішу гонки нараховує очки чемпіонату.
+6. Prometheus щоп'ять секунд збирає метрики з усіх сервісів, СУБД і брокера.
+7. Grafana будує дашборди за даними з Prometheus, Loki, Tempo і безпосередньо з PostgreSQL.
+
+### 2.3. Актуалізація даних у БД
+
+| Операція | Коли виконується |
 |---|---|
-| `race-engine` | Генерує гонку коло за колом (Strategy: симуляція або replay OpenF1), пише в БД, публікує події, віддає телеметрію як метрики |
-| `race-control` | Споживає події з RabbitMQ: журнал подій, коментарі «Race Control», статистика, нарахування очок чемпіонату |
-| `auth` | Сервер авторизації: користувачі в SQLite (bcrypt), JWT у HttpOnly cookie, ролі `admin / engineer / viewer` |
-| `pitwall-api` | REST API для читання даних (окрема read-only роль БД) |
-| `gateway` | Єдиний опублікований порт; перевіряє кожен запит через `auth` |
+| `INSERT` | нова гонка та її учасники, кожне коло, піт-стоп, зріз телеметрії (щосекунди), подія в журналі, результати чемпіонату |
+| `UPDATE` | зміна статусу гонки (`RUNNING` → `FINISHED` / `ABORTED`), визначення переможця |
+| `DELETE` | періодичне видалення телеметрії, старшої за 30 хвилин (retention) |
+| `SELECT` | REST API, панелі Grafana з джерелом PostgreSQL |
 
-## Відповідність вимогам завдання
+Незавершені гонки, що залишилися після аварійної зупинки, під час
+перезапуску автоматично отримують статус `ABORTED`.
 
-| # | Вимога | Реалізація |
+## 3. Модель даних
+
+| Таблиця / представлення | Зміст |
+|---|---|
+| `races` | гонки: назва, траса, сезон, кількість кіл, джерело даних, статус, переможець |
+| `race_entries` | учасники гонки: пілот, номер, команда, колір команди, стартова позиція |
+| `laps` | кола: час кола і секторів, позиція, розрив до лідера, шини, знос, максимальна швидкість |
+| `pit_stops` | піт-стопи: коло, час у піт-лейні, час зупинки, нові шини |
+| `telemetry` | телеметрія: швидкість, оберти, передача, газ, температура шин, паливо, заряд ERS |
+| `race_events` | журнал подій, отриманих з RabbitMQ (JSONB) |
+| `championship_results` | очки пілотів за кожну гонку |
+| `race_standings(race_id)` | функція: поточна класифікація будь-якої гонки |
+| `v_live_standings` | представлення: класифікація поточної гонки |
+| `v_championship` | представлення: залік чемпіонату (очки, перемоги, подіуми) |
+
+Схема створюється скриптами `infra/postgres/init/` під час першого запуску
+контейнера PostgreSQL. Для доступу до БД використовуються окремі ролі з
+мінімально необхідними правами:
+
+| Роль | Права | Хто використовує |
 |---|---|---|
-| 0 | СУБД у Docker | PostgreSQL 16, схема та ролі в `infra/postgres/init` |
-| 1 | Генерація/актуалізація даних (Python) | `race-engine`: `INSERT` кола, піт-стопи, телеметрія; `UPDATE` статус гонки; `DELETE` стару телеметрію (retention) |
-| 2 | Збір даних Prometheus | метрики сервісів, `postgres-exporter`, RabbitMQ, Loki, Tempo, Grafana; правила алертів `infra/prometheus/alerts.yml` |
-| 3 | Time Series Storage | вбудована TSDB Prometheus (retention 7 днів) + exemplars |
-| 4 | Grafana | 3 дашборди як код (`infra/grafana/dashboards`), datasources зв'язані між собою |
-| 5 | Grafana Loki | JSON-логи з `trace_id`; збір через Grafana Alloy з Docker |
-| 6 | Grafana Tempo | OpenTelemetry: один trace проходить race-engine → RabbitMQ → race-control → PostgreSQL; service graph |
-| 7 | Авторизація (Python + SQLite) | `services/auth` + nginx `auth_request` + Grafana auth proxy |
-| 8 | Docker | `docker-compose.yml`, один параметризований `services/Dockerfile`, non-root контейнери, healthchecks |
-| 9 | Брокер повідомлень | RabbitMQ: topic exchange, durable queue, dead-letter queue, trace context у заголовках |
+| власник БД | читання й запис | `race-engine`, `race-control` |
+| `pitwall_api` | лише читання | `pitwall-api` |
+| `grafana_reader` | лише читання | Grafana |
+| `postgres_exporter` | `pg_monitor` | `postgres-exporter` |
 
-## Запуск
+## 4. Моніторинг
 
-Потрібні Docker Desktop і `make`.
+### 4.1. Метрики (Prometheus)
 
-```bash
-make up          # створює .env з випадковими паролями, збирає і запускає все
-make ps          # стан контейнерів
+Prometheus зберігає метрики у вбудованій Time Series Storage (термін зберігання —
+7 днів). Джерела метрик:
+
+- **СУБД**: транзакції, операції вставки / оновлення / видалення / читання
+  рядків, кількість з'єднань, розмір БД, cache hit ratio, кількість рядків у
+  таблицях;
+- **робота застосунку з БД**: кількість і тривалість кожної операції за
+  таблицею та типом запиту;
+- **брокер**: кількість опублікованих, доставлених і підтверджених повідомлень,
+  глибина черг, dead-letter queue;
+- **сервіси**: кількість і тривалість HTTP-запитів, спроби входу, перевірки
+  токенів, час обробки подій;
+- **предметна область**: позиції, розриви, час кіл, знос і температура шин,
+  швидкість, паливо, обгони, піт-стопи.
+
+Правила алертів (`infra/prometheus/alerts.yml`):
+
+| Алерт | Умова |
+|---|---|
+| `ServiceDown` | сервіс недоступний понад 30 с |
+| `PostgresDown` | СУБД недоступна |
+| `QueueBacklog` | у черзі понад 500 необроблених повідомлень |
+| `DeadLetters` | з'явилися повідомлення, які не вдалося обробити |
+| `LoginBruteForce` | понад 10 невдалих спроб входу за 5 хвилин |
+| `HighHttpErrorRate` | понад 5 % відповідей з помилкою сервера |
+| `TyreWearCritical`, `SafetyCarDeployed`, `SlowPitStop` | події предметної області |
+
+### 4.2. Логи (Loki)
+
+Усі сервіси пишуть структуровані JSON-логи з ідентифікатором трейсу
+(`trace_id`). Grafana Alloy збирає логи всіх контейнерів і передає їх у Loki. З
+рядка логу в Grafana можна перейти до відповідного трейсу в Tempo.
+
+### 4.3. Трейси (Tempo)
+
+Сервіси інструментовано через OpenTelemetry. Контекст трейсу передається в
+заголовках повідомлень RabbitMQ, тому одна операція відстежується наскрізь:
+
+```
+race.lap → pit_stop → publish (RabbitMQ) → consume → handle → db INSERT (PostgreSQL)
 ```
 
-Відкрити **http://localhost:8080**. Логін `admin`, пароль: `grep ADMIN_PASSWORD .env`.
+На основі трейсів Tempo будує граф взаємодії сервісів (service graph). Метрики
+затримок містять exemplars — посилання на конкретні трейси.
 
-| URL | Що там | Доступ |
+### 4.4. Дашборди Grafana
+
+Дашборди й джерела даних налаштовуються автоматично під час запуску
+(`infra/grafana/`).
+
+| Дашборд | Вміст |
+|---|---|
+| **F1 Pit Wall** | поточна гонка, класифікація з БД, розриви, час кіл, знос і температура шин, швидкість, піт-стопи, чемпіонат, стрічка повідомлень Race Control з Loki |
+| **F1 Database & Messaging** | стан і продуктивність PostgreSQL, операції застосунку з БД, статистика таблиць, пропускна здатність і черги RabbitMQ |
+| **F1 Services & Observability** | доступність сервісів, активні алерти, service graph, HTTP-запити та затримки, спроби входу, трейси піт-стопів, логи помилок, журнал доступу gateway |
+
+## 5. Авторизація та безпека
+
+- Користувачі зберігаються в SQLite сервера авторизації, паролі — у вигляді
+  bcrypt-хешів.
+- Після входу сервер видає JWT, який браузер зберігає в HttpOnly cookie, а
+  API-клієнти передають у заголовку `Authorization: Bearer`.
+- Gateway перевіряє кожен запит до Grafana, API та адміністративних інструментів
+  через сервер авторизації (`auth_request`). Неавторизованого користувача
+  перенаправлено на сторінку входу, API повертає `401`.
+- Grafana не має власної форми входу: користувач і його роль передаються з
+  gateway (режим auth proxy).
+- Захист: обмеження частоти спроб входу, захист від open redirect і timing-атак,
+  ролі БД з мінімальними правами. Секрети зберігаються лише у файлі `.env`, який
+  не потрапляє в репозиторій.
+
+| Роль | Grafana | REST API | Prometheus, RabbitMQ UI |
+|---|---|---|---|
+| `viewer` | перегляд | так | ні |
+| `engineer` | редагування | так | ні |
+| `admin` | адміністратор | так | так |
+
+## 6. Відповідність вимогам завдання
+
+| № | Вимога | Реалізація |
 |---|---|---|
-| `/grafana/` | дашборди F1 Pit Wall, Database & Messaging, Services & Observability | будь-який користувач |
-| `/api/docs` | Swagger UI для REST API | будь-який користувач |
-| `/prometheus/` | Prometheus UI (targets, alerts) | admin |
-| `/rabbitmq/` | RabbitMQ management (логін з `.env`) | admin |
-| `/auth/logout` | вихід | — |
+| 0 | Запуск СУБД у Docker-контейнері | PostgreSQL 16 у Docker; схема, функції, представлення та ролі — `infra/postgres/init/` |
+| 1 | Генерація та актуалізація даних у БД засобами Python | `race-engine` і `race-control`: `INSERT`, `UPDATE`, `DELETE` (розділ 2.3) |
+| 2 | Збір даних Prometheus | метрики сервісів, СУБД (`postgres-exporter`), RabbitMQ, компонентів моніторингу; правила алертів |
+| 3 | Зберігання в Time Series Storage | вбудована TSDB Prometheus, термін зберігання 7 днів |
+| 4 | Відображення в Grafana | 3 дашборди; джерела Prometheus, Loki, Tempo, PostgreSQL з переходами між ними |
+| 5 | Дослідження логів Grafana Loki | структуровані JSON-логи всіх сервісів, збір через Grafana Alloy |
+| 6 | Дослідження трейсів Grafana Tempo | OpenTelemetry, наскрізні трейси через RabbitMQ, service graph |
+| 7 | Сервер авторизації (Python + SQLite) | `services/auth` (FastAPI, SQLite, bcrypt, JWT) + перевірка на gateway |
+| 8 | Контейнеризація Docker | Docker Compose, 14 контейнерів, healthchecks, сервіси працюють не від root |
+| 9 | Обмін повідомленнями між сервісами | RabbitMQ: topic exchange, durable-черга, dead-letter queue |
 
-### Джерело даних гонки
+## 7. Запуск
 
-За замовчуванням `RACE_SOURCE=replay`: двигун завантажує реальні гонки сезону
-2024 (Monza → Silverstone → Spa) з OpenF1 і програє їх у прискореному часі
-(`SPEED_FACTOR=20`: гонка триває ~4 хв). Відповіді API кешуються у volume,
-тож після першого завантаження інтернет не потрібен. Якщо API недоступне,
-система автоматично переходить на симуляцію.
+**Вимоги:** Docker Desktop (рекомендовано виділити ≥ 6 ГБ пам'яті), `make`, `openssl`.
 
 ```bash
-make simulate    # синтетичні гонки (фізика шин, стратегія піт-стопів, safety car, сходи)
-make replay      # реальні гонки з OpenF1
+make up
 ```
 
-У replay-режимі час кіл, сектори, піт-стопи, шини та повідомлення Race Control —
-реальні. Значень, яких OpenF1 не публікує (знос шин, паливо, швидкість між
-контрольними точками), система оцінює тими ж моделями, що й у симуляції.
+Команда створює файл `.env` з випадковими паролями, збирає образи й запускає
+всі контейнери. Після запуску система доступна за адресою
+**http://localhost:8080**.
 
-### Користувачі та ролі
+Обліковий запис адміністратора: логін `admin`, пароль — значення
+`ADMIN_PASSWORD` у файлі `.env`.
+
+| Адреса | Призначення | Доступ |
+|---|---|---|
+| `/grafana/` | дашборди | усі авторизовані користувачі |
+| `/api/docs` | документація REST API (Swagger UI) | усі авторизовані користувачі |
+| `/prometheus/` | інтерфейс Prometheus (targets, алерти) | `admin` |
+| `/rabbitmq/` | інтерфейс керування RabbitMQ | `admin` |
+| `/auth/logout` | вихід із системи | — |
+
+### 7.1. Керування
+
+| Команда | Дія |
+|---|---|
+| `make up` | зібрати й запустити систему |
+| `make down` | зупинити систему (дані зберігаються) |
+| `make clean` | зупинити систему й видалити всі дані |
+| `make ps` | стан контейнерів |
+| `make logs` | логи сервісів застосунку |
+| `make replay` | джерело даних — повтор реальних гонок (за замовчуванням) |
+| `make simulate` | джерело даних — симуляція |
+
+### 7.2. Налаштування джерела даних
+
+Параметри задаються у файлі `.env`:
+
+| Параметр | За замовчуванням | Опис |
+|---|---|---|
+| `RACE_SOURCE` | `replay` | `replay` — реальні гонки з OpenF1, `simulation` — симуляція |
+| `REPLAY_RACES` | `2024:Monza,2024:Silverstone,2024:Spa-Francorchamps` | гонки для повтору (рік і траса) |
+| `SPEED_FACTOR` | `20` | прискорення часу (гонка триває ≈ 4 хв) |
+
+Відповіді OpenF1 кешуються, тому після першого завантаження доступ до інтернету
+не потрібен. Якщо API недоступне, система автоматично перемикається на
+симуляцію. OpenF1 не публікує знос шин, залишок палива і швидкість між
+контрольними точками. Ці значення система оцінює тими ж моделями, що й під час
+симуляції.
+
+### 7.3. Керування користувачами
+
+Нових користувачів створює адміністратор через API:
 
 ```bash
 TOKEN=$(curl -s -X POST localhost:8080/auth/token -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$(grep ^ADMIN_PASSWORD .env | cut -d= -f2)\"}" | jq -r .access_token)
+  -d '{"username":"admin","password":"<ADMIN_PASSWORD>"}' | jq -r .access_token)
 
-# створити користувача (viewer | engineer | admin)
 curl -X POST localhost:8080/auth/users -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"username":"toto","password":"wolff-2024","role":"engineer"}'
-
-curl localhost:8080/api/races/latest/standings -H "Authorization: Bearer $TOKEN"
+  -H 'Content-Type: application/json' \
+  -d '{"username":"engineer1","password":"<пароль>","role":"engineer"}'
 ```
 
-| Роль | Grafana | API | Prometheus / RabbitMQ UI |
-|---|---|---|---|
-| `viewer` | Viewer | так | ні |
-| `engineer` | Editor | так | ні |
-| `admin` | Admin | так | так |
-
-## Що показати на захисті
-
-1. **Pit Wall**: live-класифікація з БД, розриви, знос і температура шин, швидкість, піт-стопи, чемпіонат, журнал Race Control з Loki.
-2. **Database & Messaging**: операції з рядками/с (insert/update/delete), транзакції, розмір БД, cache hit ratio, кількість рядків у таблицях, глибина черг RabbitMQ, dead letters.
-3. **Services & Observability**: стан усіх targets, алерти, service graph з Tempo, latency з exemplars (клік → trace), логи помилок.
-4. **Trace наскрізь**: на панелі «Recent pit stop traces» відкрити trace `pit_stop`, побачити ланцюг `race.lap → pit_stop → publish → consume → handle → db INSERT`, а з span перейти в логи цього trace (Loki).
-5. **Логи → trace**: у логах `race-control` поле `trace_id` є посиланням на Tempo.
-6. **Безпека**: без логіну `/grafana/` перенаправляє на сторінку входу, `/api/*` повертає 401, viewer отримує 403 на `/prometheus/`.
-
-## Структура репозиторію
+## 8. Структура репозиторію
 
 ```
-libs/common/            спільна бібліотека f1_common (DRY):
-                        settings, JSON-логи, tracing, метрики, БД, RabbitMQ, контракти подій
+libs/common/          спільна бібліотека: конфігурація, логування, трейсинг, метрики,
+                      доступ до БД, робота з RabbitMQ, контракти подій
 services/
-  Dockerfile            один образ для всіх Python-сервісів (ARG SERVICE)
-  auth/                 domain → security → repository → service → api
-  race_engine/          domain (моделі, шини, класифікація) → sources (simulation | openf1) → engine
-  race_control/         dispatcher + handlers (journal, commentary, stats, championship)
-  pitwall_api/          api → service → repository
-infra/                  конфіги postgres, prometheus, loki, tempo, alloy, rabbitmq, nginx, grafana
+  Dockerfile          спільний образ для всіх Python-сервісів
+  auth/               сервер авторизації
+  race_engine/        генератор даних: модель предметної області, джерела даних, оркестрація
+  race_control/       обробник подій з RabbitMQ
+  pitwall_api/        REST API
+infra/                конфігурація PostgreSQL, Prometheus, Loki, Tempo, Alloy,
+                      RabbitMQ, nginx, Grafana (джерела даних і дашборди)
+docker-compose.yml    опис усіх контейнерів системи
+Makefile              команди запуску, тестування й перевірки коду
 ```
 
-### Принципи
+## 9. Якість коду
 
-- **SRP** — шари HTTP / бізнес-логіка / доступ до даних розділені; кожен handler у `race-control` робить одну річ.
-- **OCP** — нове джерело гонок = новий клас `RaceSource`; нова реакція на подію = новий handler у списку, без змін диспетчера.
-- **LSP / ISP** — вузькі `Protocol`-інтерфейси (`RaceRepository`, `EventPublisher`, `UserRepository`), будь-яка реалізація (Postgres, in-memory у тестах) взаємозамінна.
-- **DIP** — бізнес-логіка залежить від абстракцій; конкретні класи збираються лише в `main.py` (composition root).
-- **DRY** — логування, tracing, метрики БД/HTTP/черг, FastAPI-фабрика, Dockerfile — по одному разу для всіх сервісів.
-- **Безпека** — bcrypt, JWT у HttpOnly cookie, захист від open redirect і timing-атак, rate limit на логін, least-privilege ролі БД, секрети лише в `.env`.
-- **Надійність** — ідемпотентні записи (`ON CONFLICT`), dead-letter queue, автоматичне перепідключення до RabbitMQ, graceful shutdown, healthchecks.
-
-## Розробка
+- **Архітектура сервісів.** Кожен сервіс поділено на шари: HTTP / обробка подій,
+  бізнес-логіка, доступ до даних (Repository). Залежності між шарами
+  спрямовані через інтерфейси (`Protocol`), а конкретні реалізації збираються в
+  одному місці — `main.py` кожного сервісу.
+- **Принципи SOLID.** Джерела даних гонки взаємозамінні (патерн Strategy).
+  Обробники подій додаються без зміни диспетчера. У тестах реальні сховища
+  замінюються реалізаціями в пам'яті.
+- **DRY.** Логування, трейсинг, метрики, робота з БД і брокером, Dockerfile
+  реалізовані один раз і використовуються всіма сервісами.
+- **Надійність.** Ідемпотентний запис подій, dead-letter queue, автоматичне
+  перепідключення до брокера, коректне завершення роботи сервісів, healthchecks
+  контейнерів.
+- **Тестування.** 48 модульних тестів (pytest) і статичний аналіз (ruff).
 
 ```bash
-make dev     # локальний venv з усіма сервісами
-make test    # unit-тести (pytest)
-make lint    # ruff
+make dev     # створити локальне віртуальне середовище
+make test    # модульні тести
+make lint    # статичний аналіз коду
 ```
