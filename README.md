@@ -230,6 +230,8 @@ make up
 | Команда | Дія |
 |---|---|
 | `make up` | зібрати й запустити систему |
+| `make up-debug` | те саме + публікація портів усіх внутрішніх сервісів на `127.0.0.1` (розділ 7.4) |
+| `make ports` | співставлення портів хост ↔ контейнер для запущених контейнерів |
 | `make down` | зупинити систему (дані зберігаються) |
 | `make clean` | зупинити систему й видалити всі дані |
 | `make ps` | стан контейнерів |
@@ -266,6 +268,197 @@ curl -X POST localhost:8080/auth/users -H "Authorization: Bearer $TOKEN" \
   -d '{"username":"engineer1","password":"<пароль>","role":"engineer"}'
 ```
 
+### 7.4. Співставлення портів (хост ↔ контейнер)
+
+Усі контейнери працюють в одній внутрішній мережі Docker `backend` і звертаються
+один до одного за іменем сервісу (`postgres:5432`, `rabbitmq:5672` тощо). На хост
+за замовчуванням опубліковано **лише один порт — gateway**: усі запити проходять
+перевірку авторизації, і жоден внутрішній сервіс не доступний напряму.
+
+Для діагностики є режим `make up-debug` (файл `docker-compose.debug.yml`), який
+додатково публікує порти внутрішніх сервісів. Вони прив'язані до `127.0.0.1`,
+тобто доступні лише з цього комп'ютера, а не з мережі.
+
+Формат запису в `docker-compose`: `"ХОСТ:ПОРТ_ХОСТА:ПОРТ_КОНТЕЙНЕРА"`.
+
+| Контейнер | Порт у контейнері | Порт на хості (`make up`) | Порт на хості (`make up-debug`) | Що там |
+|---|---|---|---|---|
+| `gateway` | 80 | **8080** (`GATEWAY_PORT`) | **8080** | єдина точка входу: `/auth`, `/grafana`, `/api`, `/prometheus`, `/rabbitmq` |
+| `auth` | 8000 | — | 127.0.0.1:8001 | сервер авторизації, Swagger `/auth/docs`, `/metrics` |
+| `pitwall-api` | 8000 | — | — ¹ | REST API, Swagger `/api/docs` |
+| `grafana` | 3000 | — | — ¹ | дашборди |
+| `race-engine` | 9100 | — | 127.0.0.1:9100 | `/metrics` (телеметрія) |
+| `race-control` | 9101 | — | 127.0.0.1:9101 | `/metrics` |
+| `postgres` | 5432 | — | 127.0.0.1:5432 | PostgreSQL |
+| `postgres-exporter` | 9187 | — | 127.0.0.1:9187 | `/metrics` СУБД |
+| `rabbitmq` | 5672 | — | 127.0.0.1:5672 | AMQP |
+| `rabbitmq` | 15672 | — | 127.0.0.1:15672 | Management UI (`/rabbitmq/`) |
+| `rabbitmq` | 15692 | — | 127.0.0.1:15692 | `/metrics` брокера |
+| `prometheus` | 9090 | — | 127.0.0.1:9090 | UI та API (`/prometheus/`) |
+| `loki` | 3100 | — | 127.0.0.1:3100 | HTTP API (LogQL) |
+| `tempo` | 3200 | — | 127.0.0.1:3200 | HTTP API (TraceQL) |
+| `tempo` | 4317 / 4318 | — | 127.0.0.1:4317 / 4318 | прийом трейсів OTLP gRPC / HTTP |
+| `alloy` | 12345 | — | 127.0.0.1:12345 | UI конвеєра збору логів |
+
+¹ Grafana і `pitwall-api` довіряють заголовкам з ідентичністю користувача, які
+виставляє gateway (`X-WEBAUTH-USER`, `X-User`). Пряма публікація дозволила б
+видати себе за будь-кого, тому вони доступні тільки через `http://localhost:8080`.
+
+Фактичне співставлення запущених контейнерів:
+
+```bash
+make ports                    # таблиця «сервіс → порти»
+docker compose port gateway 80   # → 0.0.0.0:8080
+```
+
+Змінити зовнішній порт gateway: `GATEWAY_PORT=9000` у `.env`, потім `make up`.
+
+### 7.5. Гайд: як скористатися кожним сервісом
+
+Перед початком: `make up` (або `make up-debug`), дочекатися, поки `make ps`
+покаже всі контейнери у стані `healthy`/`running` (≈ 1–2 хв), і взяти пароль
+адміністратора: `grep ADMIN_PASSWORD .env`.
+
+#### 1. Вхід у систему (auth)
+
+1. Відкрити **http://localhost:8080** → перенаправлення на `/auth/login`.
+2. Увійти як `admin` / `<ADMIN_PASSWORD>`. Браузер отримує JWT у cookie, далі всі
+   сторінки відкриваються без повторного входу.
+3. Вихід — **http://localhost:8080/auth/logout**.
+4. Swagger сервера авторизації — **http://localhost:8080/auth/docs**.
+
+Токен для консольних клієнтів (використовується в прикладах нижче):
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8080/auth/token -H 'Content-Type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"$(grep ^ADMIN_PASSWORD .env | cut -d= -f2)\"}" \
+  | jq -r .access_token)
+
+curl -s localhost:8080/auth/me    -H "Authorization: Bearer $TOKEN"   # хто я
+curl -s localhost:8080/auth/users -H "Authorization: Bearer $TOKEN"   # користувачі (admin)
+```
+
+#### 2. Grafana — дашборди
+
+**http://localhost:8080/grafana/** (будь-який авторизований користувач).
+
+- *Dashboards → F1 Pit Wall* — поточна гонка: класифікація, розриви, кола, шини,
+  піт-стопи, чемпіонат, стрічка Race Control.
+- *F1 Database & Messaging* — PostgreSQL (транзакції, рядки, з'єднання, кеш) і
+  RabbitMQ (швидкість публікації/споживання, черги).
+- *F1 Services & Observability* — доступність сервісів, алерти, service graph,
+  HTTP-затримки, спроби входу, логи помилок.
+- Перехід метрика → трейс → лог: клік на точку-exemplar на графіку затримок
+  відкриває трейс у Tempo, а з трейсу кнопка *Logs for this span* — логи в Loki.
+
+#### 3. Loki — логи
+
+*Grafana → Explore → джерело **Loki***. Приклади LogQL:
+
+```logql
+{service="race-control"}                              # усі логи сервісу
+{service=~"race-.*", level="ERROR"}                   # лише помилки
+{service="gateway"} | json | status >= 400            # невдалі HTTP-запити
+{service="auth"} |= "login"                           # спроби входу
+{service="race-engine"} | json | trace_id != ""       # логи з прив'язкою до трейсу
+```
+
+Мітки: `service` (ім'я сервісу з compose), `level`. У рядку з `trace_id` є
+посилання на відповідний трейс у Tempo.
+
+#### 4. Tempo — трейси
+
+*Grafana → Explore → джерело **Tempo***:
+
+- вкладка *Search*: Service Name = `race-engine`, Span Name = `race.lap` → список
+  трейсів кожного кола;
+- *TraceQL*: `{ resource.service.name = "race-control" && duration > 50ms }`;
+- *Service Graph* — карта викликів між сервісами (race-engine → RabbitMQ →
+  race-control → PostgreSQL).
+
+Наскрізний трейс показує подію від публікації в RabbitMQ до запису в БД.
+
+#### 5. Prometheus — метрики та алерти (роль `admin`)
+
+**http://localhost:8080/prometheus/** (у режимі debug також http://localhost:9090/prometheus/).
+
+- *Status → Targets* — усі 10 джерел метрик мають бути `UP`.
+- *Alerts* — правила: `TyreWearCritical`, `SafetyCarDeployed`, `SlowPitStop`,
+  `ServiceDown`, `PostgresDown`, `QueueBacklog`, `DeadLetters`,
+  `LoginBruteForce`, `HighHttpErrorRate`.
+- Приклади запитів у *Graph*:
+
+```promql
+f1_race_current_lap                              # поточне коло
+topk(5, f1_tyre_wear_percent)                    # найбільш зношені шини
+rate(f1_pit_stops_total[5m])                     # частота піт-стопів
+rate(pg_stat_database_xact_commit{datname="f1"}[1m])  # транзакції СУБД
+rate(app_mq_messages_consumed_total[1m])         # спожиті повідомлення
+sum by (result) (rate(auth_login_attempts_total[5m]))  # спроби входу
+up                                               # доступність усіх сервісів
+```
+
+#### 6. REST API (pitwall-api)
+
+Swagger UI: **http://localhost:8080/api/docs** (після входу в браузері можна
+виконувати запити кнопкою *Try it out*). З консолі:
+
+```bash
+H="Authorization: Bearer $TOKEN"
+curl -s localhost:8080/api/me                             -H "$H"
+curl -s localhost:8080/api/races                          -H "$H"   # список гонок
+curl -s localhost:8080/api/races/latest                   -H "$H"   # поточна гонка
+curl -s localhost:8080/api/races/latest/standings         -H "$H"   # класифікація
+curl -s localhost:8080/api/races/latest/pit-stops         -H "$H"
+curl -s localhost:8080/api/races/latest/drivers/VER/laps  -H "$H"   # кола пілота
+curl -s localhost:8080/api/races/latest/events            -H "$H"   # журнал подій
+curl -s localhost:8080/api/championship                   -H "$H"
+```
+
+Без токена API повертає `401`.
+
+#### 7. RabbitMQ — брокер повідомлень (роль `admin`)
+
+**http://localhost:8080/rabbitmq/** → вхід `RABBITMQ_USER` / `RABBITMQ_PASSWORD` з `.env`.
+
+- *Exchanges* → `race.events` (topic): сюди `race-engine` публікує події;
+  `race.events.dlx` — dead-letter.
+- *Queues* → `race-control`: черга споживача, графік швидкості повідомлень;
+  `race-control.dead` — dead-letter черга для повідомлень, які не вдалося обробити.
+
+#### 8. PostgreSQL — база даних
+
+Через контейнер (працює завжди):
+
+```bash
+docker compose exec postgres psql -U f1 -d f1
+```
+
+У режимі `make up-debug` — будь-яким клієнтом (DBeaver, DataGrip, `psql`) на
+`localhost:5432`, БД `f1`, користувач `POSTGRES_USER`, пароль `POSTGRES_PASSWORD` з `.env`.
+
+```sql
+\dt                                   -- таблиці
+SELECT * FROM v_live_standings;       -- поточна класифікація
+SELECT * FROM v_championship;         -- чемпіонат
+SELECT count(*) FROM laps;            -- кількість записаних кіл (росте під час гонки)
+```
+
+Також у Grafana: *Explore → джерело **PostgreSQL***.
+
+#### 9. Сирі метрики та Alloy (лише `make up-debug`)
+
+```bash
+curl -s localhost:9100/metrics | grep ^f1_      # телеметрія race-engine
+curl -s localhost:9101/metrics                  # race-control
+curl -s localhost:9187/metrics | grep ^pg_      # postgres-exporter
+curl -s localhost:15692/metrics | head          # RabbitMQ
+curl -s 'localhost:3100/loki/api/v1/labels'     # мітки Loki
+curl -s localhost:3200/ready                    # Tempo
+```
+
+Alloy UI — **http://localhost:12345**: граф конвеєра збору логів контейнерів.
+
 ## 8. Структура репозиторію
 
 ```
@@ -280,6 +473,7 @@ services/
 infra/                конфігурація PostgreSQL, Prometheus, Loki, Tempo, Alloy,
                       RabbitMQ, nginx, Grafana (джерела даних і дашборди)
 docker-compose.yml    опис усіх контейнерів системи
+docker-compose.debug.yml  публікація портів внутрішніх сервісів на 127.0.0.1 (make up-debug)
 Makefile              команди запуску, тестування й перевірки коду
 ```
 

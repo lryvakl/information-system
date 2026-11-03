@@ -1,0 +1,59 @@
+# Debug override: publishes the internal ports of every service on the host
+# for diagnostics (psql, PromQL, LogQL, AMQP clients, raw /metrics).
+#
+#   make up-debug        # = docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+#
+# All ports are bound to 127.0.0.1 only, so they are reachable from this machine
+# but never from the network. These ports bypass the gateway and the auth service,
+# so do not use this file outside local development.
+#
+# Format: "HOST_IP:HOST_PORT:CONTAINER_PORT"
+#
+# Grafana (3000) and pitwall-api (8000) are intentionally NOT published: they trust
+# the identity headers set by the gateway (X-WEBAUTH-USER / X-User), so direct access
+# would let anyone impersonate any user. Use them through http://localhost:8080.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"     # PostgreSQL
+
+  rabbitmq:
+    ports:
+      - "127.0.0.1:5672:5672"     # AMQP
+      - "127.0.0.1:15672:15672"   # management UI -> http://localhost:15672/rabbitmq/
+      - "127.0.0.1:15692:15692"   # Prometheus metrics
+
+  auth:
+    ports:
+      - "127.0.0.1:8001:8000"     # auth service (Swagger: /auth/docs)
+
+  race-engine:
+    ports:
+      - "127.0.0.1:9100:9100"     # /metrics
+
+  race-control:
+    ports:
+      - "127.0.0.1:9101:9101"     # /metrics
+
+  postgres-exporter:
+    ports:
+      - "127.0.0.1:9187:9187"     # /metrics
+
+  prometheus:
+    ports:
+      - "127.0.0.1:9090:9090"     # UI -> http://localhost:9090/prometheus/
+
+  loki:
+    ports:
+      - "127.0.0.1:3100:3100"     # HTTP API (LogQL)
+
+  tempo:
+    ports:
+      - "127.0.0.1:3200:3200"     # HTTP API (TraceQL)
+      - "127.0.0.1:4317:4317"     # OTLP gRPC receiver
+      - "127.0.0.1:4318:4318"     # OTLP HTTP receiver
+
+  alloy:
+    ports:
+      - "127.0.0.1:12345:12345"   # Alloy UI (pipeline graph)
