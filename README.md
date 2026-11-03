@@ -230,7 +230,6 @@ make up
 | Команда | Дія |
 |---|---|
 | `make up` | зібрати й запустити систему |
-| `make up-debug` | те саме + публікація портів усіх внутрішніх сервісів на `127.0.0.1` (розділ 7.4) |
 | `make ports` | співставлення портів хост ↔ контейнер для запущених контейнерів |
 | `make down` | зупинити систему (дані зберігаються) |
 | `make clean` | зупинити систему й видалити всі дані |
@@ -271,38 +270,56 @@ curl -X POST localhost:8080/auth/users -H "Authorization: Bearer $TOKEN" \
 ### 7.4. Співставлення портів (хост ↔ контейнер)
 
 Усі контейнери працюють в одній внутрішній мережі Docker `backend` і звертаються
-один до одного за іменем сервісу (`postgres:5432`, `rabbitmq:5672` тощо). На хост
-за замовчуванням опубліковано **лише один порт — gateway**: усі запити проходять
-перевірку авторизації, і жоден внутрішній сервіс не доступний напряму.
+один до одного за іменем сервісу (`postgres:5432`, `rabbitmq:5672` тощо). Для
+хоста контейнер — «чорна скринька»: до процесу всередині можна достукатися лише
+через порт, явно співставлений у `docker-compose.yml` (секція `ports:`).
 
-Для діагностики є режим `make up-debug` (файл `docker-compose.debug.yml`), який
-додатково публікує порти внутрішніх сервісів. Вони прив'язані до `127.0.0.1`,
-тобто доступні лише з цього комп'ютера, а не з мережі.
+Формат запису: `"IP_ХОСТА:ПОРТ_ХОСТА:ПОРТ_КОНТЕЙНЕРА"`. Наприклад,
+`"127.0.0.1:8002:8000"` означає: запит на `localhost:8002` хоста Docker передає на
+порт `8000` контейнера `pitwall-api`, де слухає Python-застосунок (uvicorn).
 
-Формат запису в `docker-compose`: `"ХОСТ:ПОРТ_ХОСТА:ПОРТ_КОНТЕЙНЕРА"`.
+- **Gateway** опубліковано на всіх інтерфейсах (`8080:80`): це основна точка входу
+  користувача з перевіркою авторизації.
+- **Решта сервісів** опубліковані на `127.0.0.1`: доступні з цього комп'ютера
+  (браузер, `curl`, `psql`, DBeaver), але не з мережі.
 
-| Контейнер | Порт у контейнері | Порт на хості (`make up`) | Порт на хості (`make up-debug`) | Що там |
-|---|---|---|---|---|
-| `gateway` | 80 | **8080** (`GATEWAY_PORT`) | **8080** | єдина точка входу: `/auth`, `/grafana`, `/api`, `/prometheus`, `/rabbitmq` |
-| `auth` | 8000 | — | 127.0.0.1:8001 | сервер авторизації, Swagger `/auth/docs`, `/metrics` |
-| `pitwall-api` | 8000 | — | — ¹ | REST API, Swagger `/api/docs` |
-| `grafana` | 3000 | — | — ¹ | дашборди |
-| `race-engine` | 9100 | — | 127.0.0.1:9100 | `/metrics` (телеметрія) |
-| `race-control` | 9101 | — | 127.0.0.1:9101 | `/metrics` |
-| `postgres` | 5432 | — | 127.0.0.1:5432 | PostgreSQL |
-| `postgres-exporter` | 9187 | — | 127.0.0.1:9187 | `/metrics` СУБД |
-| `rabbitmq` | 5672 | — | 127.0.0.1:5672 | AMQP |
-| `rabbitmq` | 15672 | — | 127.0.0.1:15672 | Management UI (`/rabbitmq/`) |
-| `rabbitmq` | 15692 | — | 127.0.0.1:15692 | `/metrics` брокера |
-| `prometheus` | 9090 | — | 127.0.0.1:9090 | UI та API (`/prometheus/`) |
-| `loki` | 3100 | — | 127.0.0.1:3100 | HTTP API (LogQL) |
-| `tempo` | 3200 | — | 127.0.0.1:3200 | HTTP API (TraceQL) |
-| `tempo` | 4317 / 4318 | — | 127.0.0.1:4317 / 4318 | прийом трейсів OTLP gRPC / HTTP |
-| `alloy` | 12345 | — | 127.0.0.1:12345 | UI конвеєра збору логів |
+| Контейнер | Порт у контейнері | Порт на хості | Що там |
+|---|---|---|---|
+| `gateway` (nginx) | 80 | **0.0.0.0:8080** (`GATEWAY_PORT`) | єдина точка входу: `/auth`, `/grafana`, `/api`, `/prometheus`, `/rabbitmq` |
+| `auth` (Python) | 8000 | 127.0.0.1:8001 | сервер авторизації, Swagger `/auth/docs`, `/healthz`, `/metrics` |
+| `pitwall-api` (Python) | 8000 | 127.0.0.1:8002 | REST API, Swagger `/api/docs`, `/healthz`, `/metrics` |
+| `race-engine` (Python) | 9100 | 127.0.0.1:9100 | `/metrics` (телеметрія) |
+| `race-control` (Python) | 9101 | 127.0.0.1:9101 | `/metrics` |
+| `postgres` | 5432 | 127.0.0.1:**5433** (`POSTGRES_HOST_PORT`) ² | PostgreSQL |
+| `postgres-exporter` | 9187 | 127.0.0.1:9187 | `/metrics` СУБД |
+| `rabbitmq` | 5672 | 127.0.0.1:5672 | AMQP |
+| `rabbitmq` | 15672 | 127.0.0.1:15672 | Management UI (`/rabbitmq/`) |
+| `rabbitmq` | 15692 | 127.0.0.1:15692 | `/metrics` брокера |
+| `prometheus` | 9090 | 127.0.0.1:9090 | UI та API (`/prometheus/`) |
+| `loki` | 3100 | 127.0.0.1:3100 | HTTP API (LogQL) |
+| `tempo` | 3200 | 127.0.0.1:3200 | HTTP API (TraceQL) |
+| `tempo` | 4317 / 4318 | 127.0.0.1:4317 / 4318 | прийом трейсів OTLP gRPC / HTTP |
+| `alloy` | 12345 | 127.0.0.1:12345 | UI конвеєра збору логів |
+| `grafana` | 3000 | — ¹ | дашборди |
 
-¹ Grafana і `pitwall-api` довіряють заголовкам з ідентичністю користувача, які
-виставляє gateway (`X-WEBAUTH-USER`, `X-User`). Пряма публікація дозволила б
-видати себе за будь-кого, тому вони доступні тільки через `http://localhost:8080`.
+¹ Grafana працює в режимі auth proxy і довіряє заголовку `X-WEBAUTH-USER`, який
+виставляє gateway. Пряма публікація дозволила б увійти будь-ким, тому Grafana
+доступна лише через `http://localhost:8080/grafana/`.
+
+² Порт хоста й порт контейнера не зобов'язані збігатися. На хості 5432 часто вже
+зайнятий локально встановленим PostgreSQL, тому зовні використовується 5433, а
+всередині мережі Docker сервіси й далі звертаються до `postgres:5432`.
+
+Пряме звернення до Python-сервісів з хоста (оминаючи gateway):
+
+```bash
+curl localhost:8001/healthz                 # auth   → {"status":"ok"}
+curl localhost:8002/healthz                 # API    → {"status":"ok"}
+curl localhost:9100/metrics | grep ^f1_     # race-engine
+# Дані API напряму: gateway зазвичай передає ім'я й роль користувача в заголовках.
+# Без них API відповідає 401 "Request must go through the gateway".
+curl localhost:8002/api/races -H "X-User: admin" -H "X-Role: admin"
+```
 
 Фактичне співставлення запущених контейнерів:
 
@@ -315,7 +332,7 @@ docker compose port gateway 80   # → 0.0.0.0:8080
 
 ### 7.5. Гайд: як скористатися кожним сервісом
 
-Перед початком: `make up` (або `make up-debug`), дочекатися, поки `make ps`
+Перед початком: `make up`, дочекатися, поки `make ps`
 покаже всі контейнери у стані `healthy`/`running` (≈ 1–2 хв), і взяти пароль
 адміністратора: `grep ADMIN_PASSWORD .env`.
 
@@ -380,7 +397,7 @@ curl -s localhost:8080/auth/users -H "Authorization: Bearer $TOKEN"   # кори
 
 #### 5. Prometheus — метрики та алерти (роль `admin`)
 
-**http://localhost:8080/prometheus/** (у режимі debug також http://localhost:9090/prometheus/).
+**http://localhost:8080/prometheus/** (або напряму http://localhost:9090/prometheus/).
 
 - *Status → Targets* — усі 10 джерел метрик мають бути `UP`.
 - *Alerts* — правила: `TyreWearCritical`, `SafetyCarDeployed`, `SlowPitStop`,
@@ -434,8 +451,8 @@ curl -s localhost:8080/api/championship                   -H "$H"
 docker compose exec postgres psql -U f1 -d f1
 ```
 
-У режимі `make up-debug` — будь-яким клієнтом (DBeaver, DataGrip, `psql`) на
-`localhost:5432`, БД `f1`, користувач `POSTGRES_USER`, пароль `POSTGRES_PASSWORD` з `.env`.
+Або з хоста будь-яким клієнтом (DBeaver, DataGrip, `psql`) на
+`localhost:5433` (`psql -h localhost -p 5433 -U f1 -d f1`), БД `f1`, користувач `POSTGRES_USER`, пароль `POSTGRES_PASSWORD` з `.env`.
 
 ```sql
 \dt                                   -- таблиці
@@ -446,7 +463,7 @@ SELECT count(*) FROM laps;            -- кількість записаних �
 
 Також у Grafana: *Explore → джерело **PostgreSQL***.
 
-#### 9. Сирі метрики та Alloy (лише `make up-debug`)
+#### 9. Сирі метрики та Alloy (напряму через порти хоста)
 
 ```bash
 curl -s localhost:9100/metrics | grep ^f1_      # телеметрія race-engine
@@ -473,7 +490,6 @@ services/
 infra/                конфігурація PostgreSQL, Prometheus, Loki, Tempo, Alloy,
                       RabbitMQ, nginx, Grafana (джерела даних і дашборди)
 docker-compose.yml    опис усіх контейнерів системи
-docker-compose.debug.yml  публікація портів внутрішніх сервісів на 127.0.0.1 (make up-debug)
 Makefile              команди запуску, тестування й перевірки коду
 ```
 

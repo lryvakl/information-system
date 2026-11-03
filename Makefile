@@ -3,9 +3,7 @@ COMPOSE := docker compose
 VENV := .venv
 PY := $(VENV)/bin/python
 
-COMPOSE_DEBUG := $(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml
-
-.PHONY: help env up up-debug down restart logs ps ports clean dev test lint format simulate replay
+.PHONY: help env up down restart logs ps ports clean dev test lint format simulate replay
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -26,12 +24,8 @@ up: env ## Build and start the whole platform
 	$(COMPOSE) up -d --build
 	@echo "Open http://localhost:$${GATEWAY_PORT:-8080}  (admin password: grep ADMIN_PASSWORD .env)"
 
-up-debug: env ## Start and also publish every service port on 127.0.0.1 (docker-compose.debug.yml)
-	$(COMPOSE_DEBUG) up -d --build
-	@echo "Gateway: http://localhost:$${GATEWAY_PORT:-8080}. Direct ports: make ports"
-
 down: ## Stop containers (data is kept)
-	$(COMPOSE_DEBUG) down
+	$(COMPOSE) down
 
 restart: ## Rebuild and restart application services
 	$(COMPOSE) up -d --build auth race-engine race-control pitwall-api
@@ -46,7 +40,7 @@ ports: ## Show host <-> container port mapping of running containers
 	@$(COMPOSE) ps --format 'table {{.Service}}\t{{.Ports}}'
 
 clean: ## Stop and DELETE all data volumes
-	$(COMPOSE_DEBUG) down -v
+	$(COMPOSE) down -v
 
 simulate: ## Switch the race engine to synthetic races
 	RACE_SOURCE=simulation $(COMPOSE) up -d race-engine
