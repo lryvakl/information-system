@@ -3,7 +3,7 @@ COMPOSE := docker compose
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: help env up down restart logs ps clean dev test lint format simulate replay
+.PHONY: help env up down restart logs ps ports clean dev test lint format simulate replay
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -35,6 +35,9 @@ logs: ## Follow application logs
 
 ps: ## Show container status
 	$(COMPOSE) ps
+
+ports: ## Show host <-> container port mapping of running containers
+	@$(COMPOSE) ps --format 'table {{.Service}}\t{{.Ports}}'
 
 clean: ## Stop and DELETE all data volumes
 	$(COMPOSE) down -v
